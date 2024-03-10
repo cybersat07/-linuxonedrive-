@@ -27,11 +27,13 @@ import log;
 import curlEngine;
 import util;
 import onedrive;
+import progress;
 import syncEngine;
 import itemdb;
 import clientSideFiltering;
 import monitor;
 import webhook;
+
 
 // What other constant variables do we require?
 const int EXIT_RESYNC_REQUIRED = 126;
@@ -137,10 +139,13 @@ int main(string[] cliArgs) {
 	if (verbosityCount == 1) { verboseLogging = true;}
 	if (verbosityCount >= 2) { debugLogging = true;}
 	
+	// Initialize the application progress manager class
+	initialiseProgressManager(verboseLogging, debugLogging);
+	
 	// Initialize the application logging class, as we know the application verbosity level
 	// If we need to enable logging to a file, we can only do this once we know the application configuration which is done slightly later on
     initialiseLogging(verboseLogging, debugLogging);
-	
+
 	/**
 	// most used
 	addLogEntry("Basic 'info' message", ["info"]); .... or just use addLogEntry("Basic 'info' message");
@@ -731,6 +736,7 @@ int main(string[] cliArgs) {
 		
 			// Detail the outcome of the sync process
 			displaySyncOutcome();
+			progressManager.clearAllJobs();
 		}
 		
 		// Are we doing a --monitor operation?
@@ -1013,6 +1019,8 @@ int main(string[] cliArgs) {
 						}
 					}
 				}
+				
+				progressManager.clearAllJobs();
 
 				if (performMonitor) {
 					auto nextCheckTime = lastCheckTime + checkOnlineInterval;
@@ -1086,6 +1094,8 @@ int main(string[] cliArgs) {
 						Thread.sleep(sleepTime);
 					}
 				}
+				
+				progressManager.clearAllJobs();
 			}
 		}
 	} else {

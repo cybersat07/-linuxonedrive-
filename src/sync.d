@@ -33,6 +33,7 @@ import util;
 import onedrive;
 import itemdb;
 import clientSideFiltering;
+import progress;
 
 class jsonResponseException: Exception {
 	@safe pure this(string inputMessage) {
@@ -789,15 +790,13 @@ class SyncEngine {
 				currentDeltaLink = null;
 			}
 			
-			// Dynamic output for non-verbose and verbose run so that the user knows something is being retreived from the OneDrive API
-			if (appConfig.verbosityCount == 0) {
-				if (!appConfig.surpressLoggingOutput) {
-					addProcessingLogHeaderEntry("Fetching items from the OneDrive API for Drive ID: " ~ driveIdToQuery, appConfig.verbosityCount);
-				}
-			} else {
-				addLogEntry("Fetching /delta response from the OneDrive API for Drive ID: " ~  driveIdToQuery, ["verbose"]);
+			if (appConfig.verbosityCount != 0 || !appConfig.surpressLoggingOutput) {
+				addLogEntry("Fetching /delta response from the OneDrive API for Drive ID: " ~  driveIdToQuery);
 			}
-							
+			
+			// Progress
+			Progress progress = progressManager.createProgress(Progress.Type.sync, "Fetching /delta response");
+
 			// Create a new API Instance for querying /delta and initialise it
 			// Reuse the socket to speed up
 			bool keepAlive = true;
@@ -823,14 +822,8 @@ class SyncEngine {
 				ulong nrChanges = count(deltaChanges["value"].array);
 				int changeCount = 0;
 				
-				if (appConfig.verbosityCount == 0) {
-					// Dynamic output for a non-verbose run so that the user knows something is happening
-					if (!appConfig.surpressLoggingOutput) {
-						addProcessingDotEntry();
-					}
-				} else {
-					addLogEntry("Processing API Response Bundle: " ~ to!string(responseBundleCount) ~ " - Quantity of 'changes|items' in this bundle to process: " ~ to!string(nrChanges), ["verbose"]);
-				}
+				progress.next(1);
+				addLogEntry("Processing API Response Bundle: " ~ to!string(responseBundleCount) ~ " - Quantity of 'changes|items' in this bundle to process: " ~ to!string(nrChanges), ["verbose"]);
 				
 				jsonItemsReceived = jsonItemsReceived + nrChanges;
 				
@@ -876,14 +869,8 @@ class SyncEngine {
 			object.destroy(getDeltaQueryOneDriveApiInstance);
 			
 			// Log that we have finished querying the /delta API
-			if (appConfig.verbosityCount == 0) {
-				if (!appConfig.surpressLoggingOutput) {
-					// Close out the '....' being printed to the console
-					addLogEntry("\n", ["consoleOnlyNoNewLine"]);
-				}
-			} else {
-				addLogEntry("Finished processing /delta JSON response from the OneDrive API", ["verbose"]);
-			}
+			addLogEntry("Finished processing /delta JSON response from the OneDrive API", ["verbose"]);
+			progress.done();
 			
 			// If this was set, now unset it, as this will have been completed, so that for a true up, we dont do a double full scan
 			if (appConfig.fullScanTrueUpRequired) {
@@ -962,9 +949,13 @@ class SyncEngine {
 			ulong batchCount = (jsonItemsToProcess.length + batchSize - 1) / batchSize;
 			ulong batchesProcessed = 0;
 			
+			Progress progress = progressManager.createProgress(Progress.Type.sync, "Processing /delta changes");
+			progress.add(jsonItemsToProcess.length);
+
 			// Dynamic output for a non-verbose run so that the user knows something is happening
 			if (!appConfig.surpressLoggingOutput) {
-				addProcessingLogHeaderEntry("Processing " ~ to!string(jsonItemsToProcess.length) ~ " applicable changes and items received from Microsoft OneDrive", appConfig.verbosityCount);
+				// Logfile entry
+				addLogEntry("Processing " ~ to!string(jsonItemsToProcess.length) ~ " applicable changes and items received from Microsoft OneDrive");
 			}
 			
 			// For each batch, process the JSON items that need to be now processed.
@@ -973,29 +964,17 @@ class SyncEngine {
 				// Chunk the total items to process into 500 lot items
 				batchesProcessed++;
 				
-				if (appConfig.verbosityCount == 0) {
-					// Dynamic output for a non-verbose run so that the user knows something is happening
-					if (!appConfig.surpressLoggingOutput) {
-						addProcessingDotEntry();
-					}
-				} else {
-					addLogEntry("Processing OneDrive JSON item batch [" ~ to!string(batchesProcessed) ~ "/" ~ to!string(batchCount) ~ "] to ensure consistent local state", ["verbose"]);
-				}	
+				addLogEntry("Processing OneDrive JSON item batch [" ~ to!string(batchesProcessed) ~ "/" ~ to!string(batchCount) ~ "] to ensure consistent local state", ["verbose"]);	
 					
 				// Process the batch
-				processJSONItemsInBatch(batchOfJSONItems, batchesProcessed, batchCount);
+				processJSONItemsInBatch(batchOfJSONItems, batchesProcessed, batchCount, progress);
 				
 				// To finish off the JSON processing items, this is needed to reflect this in the log
 				addLogEntry("------------------------------------------------------------------", ["debug"]);
 			}
 			
-			if (appConfig.verbosityCount == 0) {
-				// close off '.' output
-				if (!appConfig.surpressLoggingOutput) {
-					addLogEntry("\n", ["consoleOnlyNoNewLine"]);
-				}
-			}
-			
+			progress.done();
+
 			// Debug output - what was processed
 			addLogEntry("Number of JSON items to process is: " ~ to!string(jsonItemsToProcess.length), ["debug"]);
 			addLogEntry("Number of JSON items processed was: " ~ to!string(processedCount), ["debug"]);
@@ -1191,13 +1170,14 @@ class SyncEngine {
 	}
 	
 	// Process each of the elements contained in jsonItemsToProcess[]
-	void processJSONItemsInBatch(JSONValue[] array, ulong batchGroup, ulong batchCount) {
+	void processJSONItemsInBatch(JSONValue[] array, ulong batchGroup, ulong batchCount, Progress progress) {
 	
 		ulong batchElementCount = array.length;
 
 		foreach (i, onedriveJSONItem; array.enumerate) {
 			// Use the JSON elements rather can computing a DB struct via makeItem()
 			ulong elementCount = i +1;
+			progress.next(1);
 			
 			// To show this is the processing for this particular item, start off with this breaker line
 			addLogEntry("------------------------------------------------------------------", ["debug"]);
@@ -2030,23 +2010,16 @@ class SyncEngine {
 	// Download new file items as identified
 	void downloadOneDriveItems() {
 		// Lets deal with all the JSON items that need to be downloaded in a batch process
-		ulong batchSize = appConfig.getValueLong("threads");
-		ulong batchCount = (fileJSONItemsToDownload.length + batchSize - 1) / batchSize;
-		ulong batchesProcessed = 0;
+		Progress progress = progressManager.createProgress(Progress.Type.sync, "Downloading drive items");
+		progress.add(fileJSONItemsToDownload.length);
 		
-		foreach (chunk; fileJSONItemsToDownload.chunks(batchSize)) {
-			// send an array containing 'appConfig.getValueLong("threads")' JSON items to download
-			downloadOneDriveItemsInParallel(chunk);
-		}
-	}
-	
-	// Download items in parallel
-	void downloadOneDriveItemsInParallel(JSONValue[] array) {
-		// This function recieved an array of 16 JSON items to download
-		foreach (i, onedriveJSONItem; taskPool.parallel(array)) {
+		foreach (i, onedriveJSONItem; taskPool.parallel(fileJSONItemsToDownload)) {
 			// Take each JSON item and 
 			downloadFileItem(onedriveJSONItem);
+			progress.next(1);
 		}
+
+		progress.done();
 	}
 	
 	// Perform the actual download of an object from OneDrive
@@ -2800,7 +2773,7 @@ class SyncEngine {
 		
 		// Log what we are doing
 		if (!appConfig.surpressLoggingOutput) {
-			addProcessingLogHeaderEntry("Performing a database consistency and integrity check on locally stored data", appConfig.verbosityCount);
+			addLogEntry("Performing a database consistency and integrity check on locally stored data");
 		}
 		
 		// What driveIDsArray do we use? If we are doing a --single-directory we need to use just the drive id associated with that operation
@@ -2818,6 +2791,10 @@ class SyncEngine {
 		foreach (driveId; consistencyCheckDriveIdsArray) {
 			// Make the logging more accurate - we cant update driveId as this then breaks the below queries
 			addLogEntry("Processing DB entries for this Drive ID: " ~ driveId, ["verbose"]);
+
+			// Progress
+			Progress progress = progressManager.createProgress(Progress.Type.sync, "DB consistency check");
+			progress.add(itemDB.selectCountByDriveId(driveId));
 			
 			// Freshen the cached quota details for this driveID
 			addOrUpdateOneDriveOnlineDetails(driveId);
@@ -2875,7 +2852,7 @@ class SyncEngine {
 				// Process each database database item associated with the driveId
 				foreach(dbItem; driveItems) {
 					// Does it still exist on disk in the location the DB thinks it is
-					checkDatabaseItemForConsistency(dbItem);
+					checkDatabaseItemForConsistency(dbItem, progress);
 				}
 			} else {
 				// Check everything associated with each driveId we know about
@@ -2888,15 +2865,10 @@ class SyncEngine {
 				// Process each database database item associated with the driveId
 				foreach(dbItem; driveItems) {
 					// Does it still exist on disk in the location the DB thinks it is
-					checkDatabaseItemForConsistency(dbItem);
+					checkDatabaseItemForConsistency(dbItem, progress);
 				}
 			}
-		}
-
-		// Close out the '....' being printed to the console
-		if (!appConfig.surpressLoggingOutput) {
-			if (appConfig.verbosityCount == 0)
-				addLogEntry("\n", ["consoleOnlyNoNewLine"]);
+			progress.done();
 		}
 		
 		// Are we doing a --download-only sync?
@@ -2913,7 +2885,7 @@ class SyncEngine {
 	}
 	
 	// Check this Database Item for its consistency on disk
-	void checkDatabaseItemForConsistency(Item dbItem) {
+	void checkDatabaseItemForConsistency(Item dbItem, Progress progress) {
 			
 		// What is the local path item
 		string localFilePath;
@@ -2941,11 +2913,6 @@ class SyncEngine {
 		
 		// Log what we are doing
 		addLogEntry("Processing: " ~ logOutputPath, ["verbose"]);
-		// Add a processing '.'
-		if (!appConfig.surpressLoggingOutput) {
-			if (appConfig.verbosityCount == 0)
-				addProcessingDotEntry();
-		}
 		
 		// Determine which action to take
 		final switch (dbItem.type) {
@@ -2955,7 +2922,7 @@ class SyncEngine {
 			break;
 		case ItemType.dir:
 			// Logging output result is handled by checkDirectoryDatabaseItemForConsistency
-			checkDirectoryDatabaseItemForConsistency(dbItem, localFilePath);
+			checkDirectoryDatabaseItemForConsistency(dbItem, localFilePath, progress);
 			break;
 		case ItemType.remote:
 			// DB items that match: dbItem.remoteType == ItemType.dir - these should have been skipped above
@@ -2967,6 +2934,7 @@ class SyncEngine {
 			// Unknown type - we dont action these items
 			break;
 		}
+		progress.next(1);
 	}
 	
 	// Perform the database consistency check on this file item
@@ -3089,7 +3057,7 @@ class SyncEngine {
 	}
 	
 	// Perform the database consistency check on this directory item
-	void checkDirectoryDatabaseItemForConsistency(Item dbItem, string localFilePath) {
+	void checkDirectoryDatabaseItemForConsistency(Item dbItem, string localFilePath, Progress progress) {
 			
 		// What is the source of this item data?
 		string itemSource = "database";
@@ -3110,7 +3078,7 @@ class SyncEngine {
 					if (!singleDirectoryScope) {
 						// loop through the children
 						foreach (Item child; itemDB.selectChildren(dbItem.driveId, dbItem.id)) {
-							checkDatabaseItemForConsistency(child);
+							checkDatabaseItemForConsistency(child, progress);
 						}
 					}
 				}
@@ -3156,7 +3124,7 @@ class SyncEngine {
 					if (!singleDirectoryScope) {
 						// loop through the children
 						foreach (Item child; itemDB.selectChildren(dbItem.driveId, dbItem.id)) {
-							checkDatabaseItemForConsistency(child);
+							checkDatabaseItemForConsistency(child, progress);
 						}
 					}
 				}
@@ -3617,25 +3585,17 @@ class SyncEngine {
 	
 	// Process the list of local changes to upload to OneDrive
 	void processChangedLocalItemsToUpload() {
-		
-		// Each element in this array 'databaseItemsWhereContentHasChanged' is an Database Item ID that has been modified locally
-		ulong batchSize = appConfig.getValueLong("threads");
-		ulong batchCount = (databaseItemsWhereContentHasChanged.length + batchSize - 1) / batchSize;
-		ulong batchesProcessed = 0;
-		
-		// For each batch of files to upload, upload the changed data to OneDrive
-		foreach (chunk; databaseItemsWhereContentHasChanged.chunks(batchSize)) {
-			processChangedLocalItemsToUploadInParallel(chunk);
-		}
-	}
+		Progress progress = progressManager.createProgress(Progress.Type.sync, "Upload changed local file");
+		progress.add(databaseItemsWhereContentHasChanged.length);
 
-	// Upload the changed file batches in parallel
-	void processChangedLocalItemsToUploadInParallel(string[3][] array) {
-		foreach (i, localItemDetails; taskPool.parallel(array)) {
+		foreach (i, localItemDetails; taskPool.parallel(databaseItemsWhereContentHasChanged)) {
 			addLogEntry("Upload Thread " ~ to!string(i) ~ " Starting: " ~ to!string(Clock.currTime()), ["debug"]);
 			uploadChangedLocalFileToOneDrive(localItemDetails);
 			addLogEntry("Upload Thread " ~ to!string(i) ~ " Finished: " ~ to!string(Clock.currTime()), ["debug"]);
+			progress.next(1);
 		}
+		
+		progress.done();
 	}
 	
 	// Upload changed local files to OneDrive in parallel
@@ -4217,24 +4177,23 @@ class SyncEngine {
 		if (isDir(path)) {
 			if (!appConfig.surpressLoggingOutput) {
 				if (!cleanupLocalFiles) {
-					addProcessingLogHeaderEntry("Scanning the local file system '" ~ logPath ~ "' for new data to upload", appConfig.verbosityCount);
+					addLogEntry("Scanning the local file system '" ~ logPath ~ "' for new data to upload");
 				} else {
-					addProcessingLogHeaderEntry("Scanning the local file system '" ~ logPath ~ "' for data to cleanup", appConfig.verbosityCount);
+					addLogEntry("Scanning the local file system '" ~ logPath ~ "' for data to cleanup");
 				}
 			}
 		}
+
+		// Progress
+		Progress progress = progressManager.createProgress(Progress.Type.sync, "Filesystem Walk");
+		progress.add(preview_localfile_count(path));
 		
 		auto startTime = Clock.currTime();
 		addLogEntry("Starting Filesystem Walk:     " ~ to!string(startTime), ["debug"]);
 	
 		// Perform the filesystem walk of this path, building an array of new items to upload
-		scanPathForNewData(path);
-		if (isDir(path)) {
-			if (!appConfig.surpressLoggingOutput) {
-				if (appConfig.verbosityCount == 0)
-					addLogEntry("\n", ["consoleOnlyNoNewLine"]);
-			}
-		}
+		scanPathForNewData(path, progress);
+		progress.done();
 		
 		// To finish off the processing items, this is needed to reflect this in the log
 		addLogEntry("------------------------------------------------------------------", ["debug"]);
@@ -4252,7 +4211,7 @@ class SyncEngine {
 		// Are there any items to download post fetching the /delta data?
 		if (!newLocalFilesToUploadToOneDrive.empty) {
 			// There are elements to upload
-			addProcessingLogHeaderEntry("New items to upload to OneDrive: " ~ to!string(newLocalFilesToUploadToOneDrive.length), appConfig.verbosityCount);
+			addLogEntry("New items to upload to OneDrive: " ~ to!string(newLocalFilesToUploadToOneDrive.length));
 			
 			// Reset totalDataToUpload
 			totalDataToUpload = 0;
@@ -4296,15 +4255,9 @@ class SyncEngine {
 	}
 	
 	// Scan this path for new data
-	void scanPathForNewData(string path) {
-		// Add a processing '.'
-		if (isDir(path)) {
-			if (!appConfig.surpressLoggingOutput) {
-				if (appConfig.verbosityCount == 0)
-					addProcessingDotEntry();
-			}
-		}
-
+	void scanPathForNewData(string path, Progress progress) {
+		progress.next(1);
+		
 		ulong maxPathLength;
 		ulong pathWalkLength;
 		
@@ -4487,7 +4440,7 @@ class SyncEngine {
 							auto entries = dirEntries(path, SpanMode.shallow, false);
 							foreach (DirEntry entry; entries) {
 								string thisPath = entry.name;
-								scanPathForNewData(thisPath);
+								scanPathForNewData(thisPath, progress);
 							}
 						} catch (FileException e) {
 							// display the error message
@@ -4537,6 +4490,9 @@ class SyncEngine {
 	void handleLocalFileTrigger(string[] changedLocalFilesToUploadToOneDrive) {
 		// Is this path a new file or an existing one?
 		// Normally we would use pathFoundInDatabase() to calculate, but we need 'databaseItem' as well if the item is in the database
+		Progress progress = progressManager.createProgress(Progress.Type.sync, "Upload changed local file");
+		progress.add(changedLocalFilesToUploadToOneDrive.length);
+
 		foreach (localFilePath; changedLocalFilesToUploadToOneDrive) {
 			try {
 				Item databaseItem;
@@ -4568,7 +4524,9 @@ class SyncEngine {
 			} catch(Exception e) {
 				addLogEntry("Cannot upload file changes/creation: " ~ e.msg, ["info", "notify"]);
 			}
+			progress.next(1);
 		}
+		progress.done();
 		processNewLocalItemsToUpload();
 	}
 	
@@ -5011,28 +4969,16 @@ class SyncEngine {
 	
 	// Upload new file items as identified
 	void uploadNewLocalFileItems() {
-		// Lets deal with the new local items in a batch process
-		ulong batchSize = appConfig.getValueLong("threads");
-		ulong batchCount = (newLocalFilesToUploadToOneDrive.length + batchSize - 1) / batchSize;
-		ulong batchesProcessed = 0;
-		
-		foreach (chunk; newLocalFilesToUploadToOneDrive.chunks(batchSize)) {
-			uploadNewLocalFileItemsInParallel(chunk);
-		}
-		if (appConfig.verbosityCount == 0)
-			addLogEntry("\n", ["consoleOnlyNoNewLine"]);
-	}
-	
-	// Upload the file batches in parallel
-	void uploadNewLocalFileItemsInParallel(string[] array) {
-		foreach (i, fileToUpload; taskPool.parallel(array)) {
-			// Add a processing '.'
-			if (appConfig.verbosityCount == 0)
-				addProcessingDotEntry();
+		Progress progress = progressManager.createProgress(Progress.Type.sync, "Upload new local file");
+		progress.add(newLocalFilesToUploadToOneDrive.length);
+
+		foreach (i, fileToUpload; taskPool.parallel(newLocalFilesToUploadToOneDrive)) {
 			addLogEntry("Upload Thread " ~ to!string(i) ~ " Starting: " ~ to!string(Clock.currTime()), ["debug"]);
 			uploadNewFile(fileToUpload);
 			addLogEntry("Upload Thread " ~ to!string(i) ~ " Finished: " ~ to!string(Clock.currTime()), ["debug"]);
+			progress.next(1);
 		}
+		progress.done();
 	}
 	
 	// Upload a new file to OneDrive
